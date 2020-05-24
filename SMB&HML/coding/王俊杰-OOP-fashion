@@ -1,0 +1,205 @@
+# -*- coding: utf-8 -*-
+"""
+Size factor according to Ken. French
+Implemented in an OOP fashion
+Created on 13-05-2020
+@author: coding group      
+"""
+
+import os
+import pandas as pd
+import numpy as np
+
+class SMB_HML(object):
+    # initialize by loading data and keeping the 3 main exchanges
+    def __init__(self, path_crsp, path_compustat):
+        self.__df_crsp_data = pd.read_csv(path_crsp,
+                                          usecols = ['PERMNO', 'date', 'EXCHCD', 'DLSTCD', 'DLRET', 'PRC', 'RET', 'SHROUT'])
+        # use the main 3 exchange
+        EXCHCD = self.__df_crsp_data['EXCHCD']
+        self.__df_crsp_data = self.__df_crsp_data[np.logical_or(np.logical_and(EXCHCD >= 1, EXCHCD <= 3),
+                                                                np.logical_and(EXCHCD >= 31, EXCHCD <= 33))]
+        # include EXCHCD 31,32,33, but set them as NaN to aviod using the data
+        self.__df_crsp_data.loc[np.logical_and(EXCHCD >= 31, EXCHCD <= 33), "RET"] = np.nan
+        # convert string to number
+        self.__df_crsp_data['RET'] = pd.to_numeric(self.__df_crsp_data['RET'], errors='coerce')
+        # derive year and month
+        self.__df_crsp_data['YR'] = self.__df_crsp_data['date'] // 10000
+        self.__df_crsp_data['MM'] = self.__df_crsp_data['date'] % 10000 // 100
+        # read annual data from compustat and index by PERMNO and year
+        self.__df_compustat_data = pd.read_stata(path_compustat, columns = ['lpermno', 'fyear', 'bkvlps'])
+        self.__df_compustat_data.columns = ['PERMNO', 'YR', 'BVPS']
+        self.__df_compustat_data = self.__df_compustat_data[self.__df_compustat_data['YR'] >= 1983]
+        self.__df_compustat_data.set_index(['PERMNO', 'YR'], inplace = True)
+        
+
+    # deal with delisting stocks
+    def __DelistReturn(self):
+        # first replace all non-numeric DLRET with NA
+        DLRET = pd.to_numeric(self.__df_crsp_data["DLRET"], errors = 'coerce')
+        #notice that DLRET has 362 values as -1
+        self.__df_crsp_data.loc[np.logical_and(~pd.isnull(DLRET), DLRET != -1), 'RET'] = DLRET
+    
+
+    # compute market equity
+    def __ME_BM(self):
+        # first compute the current ME
+        self.__df_crsp_data['ME'] = self.__df_crsp_data['SHROUT'] * self.__df_crsp_data['PRC']
+        # then select entries of June and December
+        index_jun = (self.__df_crsp_data['MM'] == 6)
+        index_dec = (self.__df_crsp_data['MM'] == 12)
+        self.__df_jun = self.__df_crsp_data[index_jun]
+        self.__df_dec = self.__df_crsp_data[index_dec]
+        # lastly compute ME and MB for each year
+        self.__df_jun['ANLME'] = self.__df_jun['SHROUT'] * self.__df_jun['PRC']
+        self.__df_compustat_data['ANLME'] = self.__df_jun.set_index(['PERMNO', 'YR'])['ANLME']
+        self.__df_compustat_data['PRC'] = abs(self.__df_dec.set_index(['PERMNO', 'YR'])['PRC'])
+        self.__df_compustat_data['BM'] = self.__df_compustat_data['BVPS'] / self.__df_compustat_data['PRC']
+        
+    
+    # compute market equity of the last month
+    def __MapToMonth(self):
+        # derive the year of ME & BM to be used
+        self.__df_crsp_data['MEYR'] = self.__df_crsp_data['YR'] - (self.__df_crsp_data['MM'] <= 6)
+        self.__df_crsp_data['BMYR'] = self.__df_crsp_data['MEYR'] - 1
+        self.__df_compustat_data.reset_index(inplace = True)
+        self.__df_compustat_data['MEYR'] = self.__df_compustat_data['BMYR'] = self.__df_compustat_data['YR']
+        
+        # assign ME and MB using index mapping
+        self.__df_crsp_data = pd.merge(self.__df_crsp_data,
+                                    self.__df_compustat_data[['ANLME', 'MEYR', 'PERMNO']],
+                                    on = ['PERMNO', 'MEYR'])
+        self.__df_crsp_data = pd.merge(self.__df_crsp_data,
+                                    self.__df_compustat_data[['BM', 'BMYR', 'PERMNO']],
+                                    on = ['PERMNO', 'BMYR'])
+
+    
+    # derive breakpoints according to size and prior returns of NYSE stocks
+    def __BreakPoint(self):
+        # first extract the group of NYSE stocks
+        df_group_NYSE = self.__df_crsp_data.groupby('EXCHCD').get_group(1)
+        
+        # next derive the breakpoints of size and assign to the CRSP dataframe
+        # for the convenience of assigning breakpoints, set date as index
+        self.__df_crsp_data.set_index('date', inplace = True)
+        self.__df_size_breakpoint = df_group_NYSE.groupby('date')['ANLME'].median()
+        self.__df_crsp_data['MEBPT'] = self.__df_size_breakpoint.reset_index().set_index('date')
+        
+        # then derive the breakpoints of prior returns and assign to the CRSP dataframe
+        # like above set date as index to speed up the process of assignment
+        self.__df_lowbm_breakpoint = df_group_NYSE.groupby('date')['BM'].quantile(.3)
+        self.__df_highbm_breakpoint = df_group_NYSE.groupby('date')['BM'].quantile(.7) 
+        self.__df_crsp_data['LoBMBPT'] = self.__df_lowbm_breakpoint.reset_index().set_index('date')
+        self.__df_crsp_data['HiBMBPT'] = self.__df_highbm_breakpoint.reset_index().set_index('date')
+        
+        # at last reset index and get back the column of date
+        self.__df_crsp_data.reset_index(inplace = True)
+    
+    
+    # form 4 different portfolios using breakpoints
+    def __Portfolio(self):
+        # first form 4 different stock groups
+        ANLME = self.__df_crsp_data['ANLME']
+        MEBPT = self.__df_crsp_data['MEBPT']
+        BM = self.__df_crsp_data['BM']
+        LoBMBPT = self.__df_crsp_data['LoBMBPT']
+        HiBMBPT = self.__df_crsp_data['HiBMBPT']
+        self.__df_small_value = self.__df_crsp_data[np.logical_and(ANLME <= MEBPT, BM > HiBMBPT)]
+        self.__df_big_value = self.__df_crsp_data[np.logical_and(ANLME > MEBPT, BM > HiBMBPT)]
+        self.__df_small_neutral = self.__df_crsp_data[np.logical_and(ANLME <= MEBPT, np.logical_and(BM > LoBMBPT, BM <= HiBMBPT))]
+        self.__df_big_neutral = self.__df_crsp_data[np.logical_and(ANLME > MEBPT, np.logical_and(BM > LoBMBPT, BM <= HiBMBPT))]
+        self.__df_small_growth = self.__df_crsp_data[np.logical_and(ANLME <= MEBPT, BM < LoBMBPT)]
+        self.__df_big_growth = self.__df_crsp_data[np.logical_and(ANLME > MEBPT, BM < LoBMBPT)]
+    
+    
+    # compute porfolio returns with either value weight or equal weight
+    # use the value-weight indicator to choose between two methods of averaging
+    def __PortfolioReturn(self, value_weight):
+        # a function to compute weighted average following a given rule
+        def WeightedAverage(df_portfolio, value_weight):
+            df_group_date = df_portfolio.groupby('date')
+            # note that here use ME of the last June as weight
+            if(value_weight):
+                return df_group_date.apply(lambda x: (100 * x['RET'] * x['ANLME']).sum() / x['ANLME'].sum())
+            else:
+                return df_group_date.apply(lambda x: 100 * x['RET'].mean())
+        
+        self.__ret_small_value = WeightedAverage(self.__df_small_value, value_weight)
+        self.__ret_big_value = WeightedAverage(self.__df_big_value, value_weight)
+        self.__ret_small_neutral = WeightedAverage(self.__df_small_neutral, value_weight)
+        self.__ret_big_neutral = WeightedAverage(self.__df_big_neutral, value_weight)
+        self.__ret_small_growth = WeightedAverage(self.__df_small_growth, value_weight)
+        self.__ret_big_growth = WeightedAverage(self.__df_big_growth, value_weight)
+          
+    
+    # below are public or getter functions of the class    
+    # apply functions defined above to derive the eventual momentum factor
+    def FormPortfolio(self):
+        self.__DelistReturn()
+        self.__ME_BM()
+        self.__MapToMonth()
+        self.__BreakPoint()
+        self.__Portfolio()
+    
+    
+    # return the processed dataframe
+    def GetDetail(self):
+        return self.__df_crsp_data
+    
+    
+    # return the breakpoints
+    def GetBreakPoints(self):
+        return [self.__df_size_breakpoint, self.__df_lowbm_breakpoint, self.__df_highbm_breakpoint]
+    
+    
+    # return the momentum factors in a dataframe indexed by date
+    # use value weight to compute porfolio return by default
+    def GetFactor(self, value_weight = True):
+        self.__PortfolioReturn(value_weight)
+        self.__smb = (self.__ret_small_value + self.__ret_small_neutral + self.__ret_small_growth - self.__ret_big_value - self.__ret_big_neutral - self.__ret_big_growth) / 3
+        self.__hml = (self.__ret_small_value + self.__ret_big_value - self.__ret_small_growth - self.__ret_big_growth) / 2
+        return self.__smb, self.__hml
+  
+    
+    # read F-F factor from csv and print the correlation
+    # please make sure the time spans match
+    def PrintCorrelation(self, path_ff, path_figure = False):
+        self.__df_ff_factor = pd.read_csv(path_ff)
+        try:
+            correlation = np.corrcoef(self.__smb, self.__df_ff_factor['SMB'])[0,1]
+            print("The correlation with F-F SMB factor is %.3f" % correlation)
+        except ValueError:
+            print("The time spans of the two factor series don't match({} vs {}), and correlation cannot be computed\n".format(
+                    len(self.__smb), len(self.__df_ff_factor['SMB'])))
+        try:
+            correlation = np.corrcoef(self.__hml, self.__df_ff_factor['HML'])[0,1]
+            print("The correlation with F-F HML factor is %.3f" % correlation)
+        except ValueError:
+            print("The time spans of the two factor series don't match({} vs {}), and correlation cannot be computed\n".format(
+                    len(self.__hml), len(self.__df_ff_factor['HML'])))
+                
+    
+    # return the value-weighted portfolio returns
+    def GetPortfolioReturn(self):
+        return [self.__ret_small_value, self.__ret_big_value, self.__ret_small_neutral, self.__ret_big_neutral, self.__ret_small_growth, self.__ret_big_growth]
+
+
+if __name__ == '__main__':
+    # initialize and form the portfolios
+    path_crsp = os.path.join(os.getcwd(), "Data\CRSP.csv")
+    path_compustat = os.path.join(os.getcwd(), "Data\Compustat_Annual_Core.dta")
+    smb_hml = SMB_HML(path_crsp, path_compustat)
+    smb_hml.FormPortfolio()
+    
+    # get the details of deriving the factor, including market equity, size and breakpoints, etc.
+    df_crsp_detail = smb_hml.GetDetail()
+    # get the list of 3 different types of breakpoints
+    l_breakpoint = smb_hml.GetBreakPoints()
+    
+    # use value weight returns to derive factors
+    # get the SMB factor for each month
+    print("Below is summary of SMB and HML factors")
+    sml, hml = smb_hml.GetFactor()
+    # print the correlation with F-F factor
+    path_ff = os.path.join(os.getcwd(), "Data\F-F_Factors.csv")
+    smb_hml.PrintCorrelation(path_ff)
