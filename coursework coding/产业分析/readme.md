@@ -5,6 +5,6 @@
   2. 处理raw data的py文件
   3. 回归过程中的stata do文件
   4. stata输出的log文件
-  5. pre中使用的pdf
+  5. pre中使用的ppt
 
 mark：其中TFP数据保存在百度网盘中，raw data只包含工业企业基本面数据（行业平均）
