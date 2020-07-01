@@ -1,0 +1,2 @@
+本文件夹主要记录了在金融经济学中解CAPM模型的代码
+用到的是基本的quadratic programming.
