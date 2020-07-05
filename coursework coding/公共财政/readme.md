@@ -1,5 +1,5 @@
 本文件夹记录公共财政项目： “Bureaucracy, statesmen and Terrorists -- An Empirical Study on international Terrorism”的过程
-其中，论文原文不附上
+其中，论文原文可能无法预览，请直接下载！
 
 文件包括：
   1. 使用的数据集（文件由于太大无法上传）
