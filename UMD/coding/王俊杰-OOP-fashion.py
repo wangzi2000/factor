@@ -3,7 +3,7 @@
 UMD factor according to Ken. French
 Implemented in an OOP fashion
 Created on 13-05-2020
-@author: coding group      
+@author: Junjie Wang (coding group)      
 """
 
 import os
